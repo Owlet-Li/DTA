@@ -23,7 +23,6 @@ class Worker:
         self.experience = {idx:[] for idx in range(7)}
         self.episode_number = None
         self.perf_metrics = {}
-        self.p_rnn_state = {}
         self.max_time = EnvParams.MAX_TIME
 
     def run_episode(self, training=True, sample=False, max_waiting=False):
@@ -118,15 +117,7 @@ class Worker:
         reward, finished_tasks = self.baseline_env.get_episode_reward(self.max_time)
         return reward
 
-    def work(self, episode_number, use_time_driven=False):
-        """
-        Interacts with the environment. The agent gets either gradients or experience buffer
-        
-        Args:
-            episode_number: 当前episode的编号
-            use_time_driven: 是否使用时间驱动的模拟方式。默认为False，使用原始的事件驱动方式。
-                           如果为True，则使用精细时间步长模拟，但保持与原始方法相同的训练过程。
-        """
+    def work(self, episode_number):
         baseline_rewards = []
         buffers = []
         metrics = []
@@ -179,43 +170,45 @@ class Worker:
         buffer_dict = {idx:[] for idx in range(7)}
         perf_metrics = {}
 
-        deadlock_check_interval = 10
+        # 添加死锁检测计数器
+        deadlock_check_interval = TrainParams.DEADLOCK_CHECK_INTERVAL  # 每隔多少个时间步检查一次死锁
         deadlock_check_counter = 0
 
         while not self.env.finished and self.env.current_time < EnvParams.MAX_TIME:
             with torch.no_grad():
+                # 渲染环境并处理退出请求
                 if render:
                     quit_requested = self.env.render()
                     if quit_requested:
                         # 用户请求退出
                         print("用户请求退出仿真")
                         break
-
+                # 如果暂停状态，则跳过更新逻辑
                 if self.env.paused:
+                    # 简单延时以避免CPU使用率过高
                     time.sleep(0.01)
                     continue
-
                 release_agents = []
                 for agent_id, agent in self.env.agent_dic.items():
+                    # 跳过已禁用的智能体
                     if agent_id in self.env.disabled_agents:
                         continue
-                        
+                    # 0时刻让所有智能体都加入决策
                     if self.env.current_time == 0:
                         release_agents.append(agent_id)
                         continue
+                    # 如果智能体已经返回depot，不需要再做决策
                     if agent['current_task'] < 0:
-                        # 如果智能体已经返回depot，不需要再做决策
                         if agent['returned']:
                             continue
                         else:
-                            # 智能体前往depot但尚未到达
                             self.env.agent_step_every_time(agent_id, agent['current_task'])
                     elif agent['current_task'] >= 0 and self.env.task_dic[agent['current_task']]['finished']:
                         release_agents.append(agent_id)
                     elif agent['current_task'] >= 0 and not self.env.task_dic[agent['current_task']]['finished']:
                         self.env.agent_step_every_time(agent_id, agent['current_task'])
 
-                # 定期检查死锁或在新增任务后检查
+                # 定期检查死锁或在新增任务后检查，问题，有事强制重新分配不一定能完全解决问题，特别是面对argmax的情况
                 deadlock_check_counter += 1
                 if deadlock_check_counter >= deadlock_check_interval:
                     deadlock_check_counter = 0
@@ -225,48 +218,24 @@ class Worker:
                         # 如果检测到死锁，尝试解决
                         if render:
                             print(f"时间 {self.env.current_time:.2f}: 检测到死锁")
-                        deadlock_resolved = self.env.resolve_deadlock()
-                        if deadlock_resolved:
+                        for agent_id, agent in self.env.agent_dic.items():
+                            if agent_id in self.env.disabled_agents:
+                                continue
+                            release_agents.append(agent_id)
                             if render:
-                                print(f"时间 {self.env.current_time:.2f}: 死锁已解决，强制重新分配任务")
-                            self.env.force_reassign_tasks()
-                        else:
-                            if render:
-                                print(f"时间 {self.env.current_time:.2f}: 死锁未解决，强制重新分配所有任务")
-                            # 重新获取可用的智能体
-                            for agent_id, agent in self.env.agent_dic.items():
-                                if agent_id in self.env.disabled_agents:
-                                    continue
-                                    
-                                # if agent['returned'] or agent['current_task'] < 0:
-                                    # 强制将智能体添加到决策队列
-                                release_agents.append(agent_id)
-                                if render:
-                                    print(f"时间 {self.env.current_time:.2f}: 强制将智能体 {agent_id} 添加到决策队列")
+                                print(f"时间 {self.env.current_time:.2f}: 强制将智能体 {agent_id} 添加到决策队列")
 
                 random.shuffle(release_agents)
                 while release_agents:
-                    agent_id = release_agents.pop(0)
-                    # 跳过已禁用的智能体
-                    if agent_id in self.env.disabled_agents:
-                        continue
-                        
+                    agent_id = release_agents.pop(0)      
                     agent = self.env.agent_dic[agent_id]
                     task_info, total_agents, mask = self.convert_torch(self.env.agent_observe(agent_id, max_waiting))
-                    
-                    # 检查掩码是否全为1（表示智能体被禁用）
-                    if mask[0, :].all().item():
-                        continue
-                        
                     block_flag = mask[0, 1:].all().item()
-                    
                     if block_flag and not np.all(self.env.get_matrix(self.env.task_dic, 'feasible_assignment')):
                         agent['no_choice'] = block_flag
                         continue
                     elif block_flag and np.all(self.env.get_matrix(self.env.task_dic, 'feasible_assignment')) and agent['current_task'] < 0:
                         continue
-                    
-                    # 正常的决策逻辑
                     if training:
                         task_info, total_agents, mask = self.obs_padding(task_info, total_agents, mask)
                     index = torch.LongTensor([agent_id]).reshape(1, 1, 1).to(self.device)
@@ -280,8 +249,7 @@ class Worker:
                             action = Categorical(probs).sample()
                         else:
                             action = torch.argmax(probs, dim=1)
-                            
-                    # 执行选择的动作
+                     # 执行选择的动作
                     if action.item() == 0:
                         # 返回仓库的动作是0（对应任务ID为-1）
                         depot_id = -agent['species'] - 1
@@ -290,7 +258,6 @@ class Worker:
                     else:
                         agent['current_task'] = action.item() - 1
                         self.env.agent_step_every_time(agent_id, agent['current_task'])
-                    
                     # 训练模式下存储经验
                     if training:
                         # buffer_dict[0]: 存储智能体的状态信息(total_agents)
@@ -307,21 +274,16 @@ class Worker:
                         buffer_dict[5] += index
                         # buffer_dict[6]: 存储优势值，初始化为0
                         buffer_dict[6] += torch.FloatTensor([[0]]).to(self.device)
-                
                 # 更新环境时间
                 self.env.current_time += self.env.dt
-                
                 # 检查是否完成
                 self.env.check_finished_every_time()
-                
         # 结束运行并收集结果
         terminal_reward, finished_tasks = self.env.get_episode_reward(self.max_time)
-        
         perf_metrics['success_rate'] = [np.sum(finished_tasks)/len(finished_tasks)]
         perf_metrics['makespan'] = [self.env.current_time]
         perf_metrics['time_cost'] = [np.nanmean(self.env.get_matrix(self.env.task_dic, 'time_start'))]
         perf_metrics['waiting_time'] = [np.mean(self.env.get_matrix(self.env.agent_dic, 'sum_waiting_time'))]
         perf_metrics['travel_dist'] = [np.sum(self.env.get_matrix(self.env.agent_dic, 'travel_dist'))]
         perf_metrics['efficiency'] = [self.env.get_efficiency()]
-        
         return terminal_reward, buffer_dict, perf_metrics

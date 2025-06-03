@@ -1,11 +1,6 @@
 import numpy as np
-try:
-    import pygame
-    from pygame import gfxdraw
-    PYGAME_AVAILABLE = True
-except ImportError:
-    PYGAME_AVAILABLE = False
-    print("警告: pygame未安装，渲染功能将不可用。")
+import pygame
+from pygame import gfxdraw
 import time
 
 class RenderSettings:
@@ -19,37 +14,36 @@ class RenderSettings:
     animation_speed = 0.5  # 动画速度调整系数，减小以放慢动画速度
 
 class TaskEnv:
-    def __init__(self, per_species_range=(10, 10), species_range=(5, 5), tasks_range=(30, 30), traits_dim=5, decision_dim=10, max_task_size=2, duration_scale=5, seed=None, plot_figure=False):
+    def __init__(self, per_species_range=(10, 10), species_range=(5, 5), tasks_range=(30, 30), traits_dim=5, decision_dim=10, max_task_size=2, duration_scale=5, seed=None, plot_figure=False, single_ability=False):
         self.rng = None
         if seed is not None:
             self.rng = np.random.default_rng(seed) 
-        self.per_species_range = per_species_range
-        self.species_range = species_range
-        self.tasks_range = tasks_range
-        self.traits_dim = traits_dim
-        self.decision_dim = decision_dim
-        self.max_task_size = max_task_size
-        self.duration_scale = duration_scale
-        self.plot_figure = plot_figure
+        self.per_species_range = per_species_range # 每个物种的智能体数量范围
+        self.species_range = species_range # 物种数量范围
+        self.tasks_range = tasks_range # 任务数量范围
+        self.traits_dim = traits_dim # 能力值维度
+        self.max_task_size = max_task_size # 每个任务的最大能力值
+        self.duration_scale = duration_scale # 任务持续时间缩放因子
+        self.single_ability = single_ability # 是否使用单一能力模式
 
         self.task_dic, self.agent_dic, self.depot_dic, self.species_dict = self.generate_env()
         self.species_distance_matrix, self.species_neighbor_matrix = self.generate_distance_matrix() 
         self.tasks_num = len(self.task_dic)
         self.agents_num = len(self.agent_dic)
         self.species_num = len(self.species_dict['number'])
-        self.coalition_matrix = np.zeros((self.agents_num, self.tasks_num))
 
         self.current_time = 0
         self.dt = 0.1
         self.max_waiting_time = 200
         self.depot_waiting_time = 0
         self.finished = False
-        self.reactive_planning = False
 
+        # 添加一个列表用于存储被禁用的智能体
+        self.disabled_agents = []
         self.screen = None
         self.clock = None
-        self.paused = False
         self.surf = None
+        self.paused = False
         self.species_colors = [
             (255, 0, 0),    # 红色
             (0, 0, 255),    # 蓝色
@@ -62,8 +56,6 @@ class TaskEnv:
             (0, 128, 255),  # 天蓝
             (128, 255, 0)   # 黄绿
         ]
-        # 添加一个列表用于存储被禁用的智能体
-        self.disabled_agents = []
 
     def random_int(self, low, high, size=None):
         if self.rng is not None:
@@ -80,15 +72,15 @@ class TaskEnv:
         return value
 
     def generate_env(self):
-        tasks_num = self.random_int(self.tasks_range[0], self.tasks_range[1] + 1)
-        species_num = self.random_int(self.species_range[0], self.species_range[1] + 1)
-        agents_species_num = [self.random_int(self.per_species_range[0], self.per_species_range[1] + 1) for _ in range(species_num)]
+        tasks_num = self.random_int(self.tasks_range[0], self.tasks_range[1] + 1) # 任务数量
+        species_num = self.random_int(self.species_range[0], self.species_range[1] + 1) # 物种数量
+        agents_species_num = [self.random_int(self.per_species_range[0], self.per_species_range[1] + 1) for _ in range(species_num)] # 每个物种的智能体数量
 
-        agents_ini = self.generate_agent(species_num)
-        tasks_ini = self.generate_task(tasks_num)
+        agents_ini = self.generate_agent(species_num) # 每个物种的能力值
+        tasks_ini = self.generate_task(tasks_num, species_num, agents_species_num) # 每个任务的能力值
         while not np.all(np.matmul(agents_species_num, agents_ini) >= tasks_ini):
             agents_ini = self.generate_agent(species_num)
-            tasks_ini = self.generate_task(tasks_num)
+            tasks_ini = self.generate_task(tasks_num, species_num, agents_species_num)
 
         depot_loc = self.random_value(species_num, 2)
         cost_ini = [self.random_value(1, 1) for _ in range(species_num)]
@@ -103,71 +95,114 @@ class TaskEnv:
         species_dict['number'] = agents_species_num
 
         for i in range(tasks_num):
-            task_dic[i] = {'ID': i,
-                           'requirements': tasks_ini[i, :],  # requirements of the task
-                           'members': [],  # members of the task
-                           'cost': [],  # cost of each agent
-                           'location': tasks_loc[i, :],  # location of the task
-                           'feasible_assignment': False,  # whether the task assignment is feasible
-                           'finished': False,
-                           'time_start': 0,
-                           'time_finish': 0,
-                           'status': tasks_ini[i, :],
-                           'time': float(tasks_time[i, :]),
-                           'sum_waiting_time': 0,
-                           'efficiency': 0,
-                           'abandoned_agent': [],
-                           'optimized_ability': None,
+            task_dic[i] = {'ID': i,                                    # 任务的唯一标识符
+                           'requirements': tasks_ini[i, :],            # 任务的能力需求向量，每个维度表示对应能力的需求量
+                           'members': [],                              # 分配给此任务的智能体ID列表
+                           'cost': [],                                 # 每个分配智能体的成本列表（暂未使用）
+                           'location': tasks_loc[i, :],               # 任务在2D空间中的位置坐标 [x, y]
+                           'feasible_assignment': False,              # 布尔值，表示任务是否已找到可行的智能体分配方案
+                           'finished': False,                         # 布尔值，表示任务是否已完成
+                           'time_start': 0,                           # 任务实际开始执行的时间
+                           'time_finish': 0,                          # 任务完成的时间
+                           'status': tasks_ini[i, :],                 # 任务当前状态，表示各维度剩余的能力需求量
+                           'time': float(tasks_time[i, :]),           # 任务执行所需的持续时间
+                           'sum_waiting_time': 0,                     # 所有分配智能体在此任务上的总等待时间
+                           'efficiency': 0,                           # 任务执行效率，用于评估任务完成质量
+                           'abandoned_agent': [],                     # 被放弃分配的智能体ID列表（超时或其他原因）
+                           'optimized_ability': None,                 # 优化后的能力分配（可选，用于高级算法）
                            'optimized_species': []}
 
         i = 0
         for s, n in enumerate(agents_species_num):
             species_dict[s] = []
             for j in range(n):
-                agent_dic[i] = {'ID': i,
-                                'species': s,
-                                'abilities': agents_ini[s, :],
-                                'location': depot_loc[s, :],
-                                'route': [- s - 1],
-                                'current_task': - s - 1,
-                                'contributed': False,
-                                'arrival_time': [0.],
-                                'cost': cost_ini[s],
-                                'travel_time': 0,
-                                'velocity': 0.2,
-                                'next_decision': 0,
-                                'depot': depot_loc[s, :],
-                                'travel_dist': 0,
-                                'sum_waiting_time': 0,
-                                'current_action_index': 0,
-                                'decision_step': 0,
-                                'task_waiting_ratio': 1,
-                                'trajectory': [],
-                                'angle': 0,
-                                'returned': False,
-                                'assigned': False,
-                                'pre_set_route': None,
-                                'no_choice': False}
+                agent_dic[i] = {'ID': i,                                    # 智能体的唯一标识符
+                                'species': s,                               # 智能体所属的物种编号
+                                'abilities': agents_ini[s, :],             # 智能体的能力向量，每个维度表示对应能力的数值
+                                'location': depot_loc[s, :],               # 智能体当前在2D空间中的位置坐标 [x, y]
+                                'route': [- s - 1],                       # 智能体的路径规划，负数表示仓库ID，正数表示任务ID
+                                'current_task': - s - 1,                  # 智能体当前执行的任务ID，负数表示在仓库中
+                                'contributed': False,                      # 布尔值，表示智能体是否对当前任务做出了贡献
+                                'arrival_time': [0.],                      # 智能体到达路径中各个位置的时间列表
+                                'cost': cost_ini[s],                       # 智能体的运营成本
+                                'travel_time': 0,                          # 智能体当前行程的旅行时间
+                                'velocity': 0.2,                           # 智能体的移动速度
+                                'next_decision': 0,                        # 智能体下一次需要做决策的时间点
+                                'depot': depot_loc[s, :],                  # 智能体所属仓库的位置坐标
+                                'travel_dist': 0,                          # 智能体累计的旅行距离
+                                'sum_waiting_time': 0,                     # 智能体累计的等待时间
+                                'current_action_index': 0,                 # 智能体当前动作在动作序列中的索引
+                                'decision_step': 0,                        # 智能体当前的决策步数
+                                'task_waiting_ratio': 1,                   # 任务等待时间比例因子
+                                'trajectory': [],                          # 智能体的历史轨迹记录
+                                'angle': 0,                                # 智能体当前的朝向角度
+                                'returned': False,                         # 布尔值，表示智能体是否已返回仓库
+                                'assigned': False,                         # 布尔值，表示智能体是否被分配给某个任务
+                                'pre_set_route': None,                     # 预设的路径（如果有的话）
+                                'no_choice': False}                        # 布尔值，表示智能体是否无可选择的动作
                 species_dict[s].append(i)
                 i += 1
 
         for s in range(species_num):
-            depot_dic[s] = {'location': depot_loc[s, :],
-                            'members': species_dict[s],
-                            'ID': - s - 1}
+            depot_dic[s] = {'location': depot_loc[s, :],               # 仓库在2D空间中的位置坐标 [x, y]
+                            'members': species_dict[s],                # 属于此仓库的智能体ID列表
+                            'ID': - s - 1}                            # 仓库的唯一标识符（负数以区分任务ID）
 
         return task_dic, agent_dic, depot_dic, species_dict
 
     def generate_agent(self, species_num):
-        agents_ini = self.random_int(0, 2, (species_num, self.traits_dim)) # 注意此处能力值只有0和1，为每个物种生成相应的能力
-        while not np.all(np.sum(agents_ini, axis=1) != 0) or np.unique(agents_ini, axis=0).shape[0] != species_num: # 确保每个物种至少有一个能力，且每个物种的能力值都不同
-            agents_ini = self.random_int(0, 2, (species_num, self.traits_dim))
+        if self.single_ability:
+            # 单一能力模式：每个物种按顺序分配一种能力
+            agents_ini = np.zeros((species_num, self.traits_dim), dtype=int)
+            # 确保有足够的维度给每个物种分配不同的能力
+            if species_num > self.traits_dim:
+                raise ValueError(f"物种数量 ({species_num}) 不能超过能力维度 ({self.traits_dim})")
+            
+            # 按顺序为每个物种分配能力：第0个物种[1,0,0,0,0]，第1个物种[0,1,0,0,0]，以此类推
+            for i in range(species_num):
+                agents_ini[i, i] = 1
+        else:
+            # 原有模式：可以有多种能力的组合
+            agents_ini = self.random_int(0, 2, (species_num, self.traits_dim)) # 注意此处能力值只有0和1，为每个物种生成相应的能力
+            while not np.all(np.sum(agents_ini, axis=1) != 0) or np.unique(agents_ini, axis=0).shape[0] != species_num: # 确保每个物种至少有一个能力，且每个物种的能力值都不同
+                agents_ini = self.random_int(0, 2, (species_num, self.traits_dim))
         return agents_ini
 
-    def generate_task(self, tasks_num):
-        tasks_ini = self.random_int(0, self.max_task_size, (tasks_num, self.traits_dim))
-        while not np.all(np.sum(tasks_ini, axis=1) != 0):
-            tasks_ini = self.random_int(0, self.max_task_size, (tasks_num, self.traits_dim))
+    def generate_task(self, tasks_num, species_num, agents_species_num=None):
+        if self.single_ability:
+            # 单一能力模式：先在前species_num个维度生成需求，然后扩展到self.traits_dim维度
+            # 每个维度的需求不能超过该维度对应的智能体数量
+            if agents_species_num is None:
+                raise ValueError("在单一能力模式下，generate_task方法需要agents_species_num参数")
+            
+            tasks_ini_partial = np.zeros((tasks_num, species_num), dtype=int)
+            for i in range(tasks_num):
+                for j in range(species_num):
+                    # 对第j个维度，需求值不能超过第j个物种的智能体数量和max_task_size的最小值
+                    max_demand = min(agents_species_num[j], self.max_task_size)
+                    tasks_ini_partial[i, j] = self.random_int(0, max_demand + 1)
+            
+            # 确保每个任务至少有一个需求
+            while not np.all(np.sum(tasks_ini_partial, axis=1) > 0):
+                for i in range(tasks_num):
+                    if np.sum(tasks_ini_partial[i, :]) == 0:
+                        # 如果这个任务没有需求，随机选择一个维度设置需求
+                        dim = self.random_int(0, species_num)
+                        max_demand = min(agents_species_num[dim], self.max_task_size)
+                        if max_demand > 0:
+                            tasks_ini_partial[i, dim] = self.random_int(1, max_demand + 1)
+            
+            # 扩展到self.traits_dim维度，剩余维度填充0
+            if self.traits_dim > species_num:
+                padding = np.zeros((tasks_num, self.traits_dim - species_num), dtype=int)
+                tasks_ini = np.hstack([tasks_ini_partial, padding])
+            else:
+                tasks_ini = tasks_ini_partial
+        else:
+            # 原有模式：任务可以在任何维度上有需求
+            tasks_ini = self.random_int(0, self.max_task_size + 1, (tasks_num, self.traits_dim))
+            while not np.all(np.sum(tasks_ini, axis=1) != 0):
+                tasks_ini = self.random_int(0, self.max_task_size + 1, (tasks_num, self.traits_dim))
         return tasks_ini
 
     def generate_distance_matrix(self):
@@ -224,12 +259,6 @@ class TaskEnv:
         return release_agents, next_decision
 
     def agent_observe(self, agent_id, max_waiting=False):
-        if agent_id in self.disabled_agents:
-            mask = np.ones(self.tasks_num + 1, dtype=bool)  # 所有任务都被掩码覆盖
-            agents_info = np.expand_dims(self.get_current_agent_status(self.agent_dic[agent_id]), axis=0)
-            tasks_info = np.expand_dims(self.get_current_task_status(self.agent_dic[agent_id]), axis=0)
-            mask = np.expand_dims(mask, axis=0)
-            return tasks_info, agents_info, mask
         agent = self.agent_dic[agent_id]
         mask = self.get_unfinished_task_mask()
         contributable_mask = self.get_contributable_task_mask(agent_id)
@@ -303,16 +332,6 @@ class TaskEnv:
 
     def get_current_task_status(self, agent):
         status = []
-        for a_id, a in self.agent_dic.items():
-            # 对于已禁用的智能体，添加特殊标记
-            if a_id in self.disabled_agents:
-                # 创建一个全0向量，但在最后一位添加失效标记
-                disabled_status = np.zeros_like(a['abilities'], dtype=float)
-                # 创建一个失效智能体的状态向量
-                temp_status = np.hstack([disabled_status, 0, 0, 0,
-                                        agent['location'] - a['location'], False])
-                status.append(temp_status)
-                continue
         for t in self.task_dic.values():
             travel_time = self.calculate_eulidean_distance(agent, t) / agent['velocity']
             temp_status = np.hstack([t['status'], t['requirements'], t['time'], travel_time, agent['location'] - t['location'], t['feasible_assignment']])
@@ -559,7 +578,7 @@ class TaskEnv:
                 # 每次只禁用一个智能体，找到后就退出
                 return True
         return False
-        
+
     def _create_new_task(self, mouse_x, mouse_y):
         """直接创建新任务，不检查是否为空白区域"""
         # 将鼠标位置转换为环境坐标
@@ -571,17 +590,49 @@ class TaskEnv:
         new_task_id = self.tasks_num
         
         # 随机生成任务需求
-        # 根据物种能力总和设置任务需求，确保可完成
-        species_abilities = self.species_dict['abilities']
-        total_ability = np.sum(species_abilities, axis=0)
-        
-        # 创建一个随机需求，保证至少有一个维度有需求且不超过物种总能力的50%
-        requirements = np.zeros(self.traits_dim, dtype=int)
-        while np.sum(requirements) == 0:
-            for i in range(self.traits_dim):
-                if total_ability[i] > 0:
-                    max_req = max(1, int(total_ability[i] * 0.5))  # 最大需求为总能力的50%
-                    requirements[i] = self.random_int(0, max_req + 1)
+        if self.single_ability:
+            # 单一能力模式：基于未被禁用的智能体数量生成需求
+            requirements = np.zeros(self.traits_dim, dtype=int)
+            
+            # 计算每个物种未被禁用的智能体数量
+            available_agents_per_species = []
+            for species_id in range(self.species_num):
+                species_agents = self.species_dict[species_id]
+                available_count = sum(1 for agent_id in species_agents if agent_id not in self.disabled_agents)
+                available_agents_per_species.append(available_count)
+            
+            # 为前species_num个维度生成需求
+            for i in range(self.species_num):
+                if available_agents_per_species[i] > 0:
+                    # 需求不能超过该维度可用的智能体数量
+                    max_req = min(available_agents_per_species[i], self.max_task_size)
+                    if max_req > 0:
+                        requirements[i] = self.random_int(0, max_req + 1)
+            
+            # 确保至少有一个维度有需求
+            if np.sum(requirements) == 0:
+                # 找到有可用智能体的维度
+                available_dims = [i for i in range(self.species_num) if available_agents_per_species[i] > 0]
+                if available_dims:
+                    # 随机选择一个维度设置需求
+                    dim = self.random_int(0, len(available_dims))
+                    selected_dim = available_dims[dim]
+                    max_req = min(available_agents_per_species[selected_dim], self.max_task_size)
+                    requirements[selected_dim] = self.random_int(1, max_req + 1)
+            
+            print(f"单一能力模式 - 可用智能体数量: {available_agents_per_species}, 生成需求: {requirements[:self.species_num]}")
+        else:
+            # 原有模式：根据物种能力总和设置任务需求，确保可完成
+            species_abilities = self.species_dict['abilities']
+            total_ability = np.sum(species_abilities, axis=0)
+            
+            # 创建一个随机需求，保证至少有一个维度有需求且不超过物种总能力的50%
+            requirements = np.zeros(self.traits_dim, dtype=int)
+            while np.sum(requirements) == 0:
+                for i in range(self.traits_dim):
+                    if total_ability[i] > 0:
+                        max_req = max(1, int(total_ability[i] * 0.5))  # 最大需求为总能力的50%
+                        requirements[i] = self.random_int(0, max_req + 1)
         
         # 创建任务
         self.task_dic[new_task_id] = {
@@ -607,20 +658,10 @@ class TaskEnv:
         self.tasks_num += 1
         
         print(f"在位置({location_x:.2f}, {location_y:.2f})创建新任务 {new_task_id}，需求: {requirements}")
-        
-        # 在创建新任务后立即检查是否导致死锁，并尝试解决
-        # if self.check_deadlock():
-        #     print("新增任务后检测到潜在死锁情况，尝试解决...")
-        #     self.resolve_deadlock()
-        #     self.force_reassign_tasks()
             
         return new_task_id
 
     def render(self):
-        if not PYGAME_AVAILABLE:
-            print("pygame未安装，无法渲染。请安装pygame。")
-            return False
-
         # 添加动画速度控制
         if not hasattr(self, 'last_render_time'):
             self.last_render_time = time.time()
@@ -640,7 +681,7 @@ class TaskEnv:
         if hasattr(pygame, 'get_init') and not getattr(pygame, 'get_init')():
             if hasattr(pygame, 'init'):
                 getattr(pygame, 'init')()
-            
+
         # 确保总是处理所有事件，特别是在暂停状态下
         quit_requested = False
         for event in pygame.event.get():
@@ -674,22 +715,22 @@ class TaskEnv:
                     if not self._handle_agent_click(mouse_x, mouse_y):
                         # 如果没有点击到智能体，则创建新任务
                         self._create_new_task(mouse_x, mouse_y)
-        
+
         if hasattr(pygame, 'event') and hasattr(pygame.event, 'pump'):
             pygame.event.pump()
-        
+
         if self.screen is None:
             pygame.display.init()
             self.screen = pygame.display.set_mode((RenderSettings.screen_width, RenderSettings.screen_height))
             pygame.display.set_caption("HMRTA_MPE_ENV")
             self.screen.fill(RenderSettings.bg_color)
-            
+
         if self.clock is None:
             self.clock = pygame.time.Clock()
             
         if self.surf is None:
             self.surf = pygame.Surface((RenderSettings.screen_width, RenderSettings.screen_height))
-            
+
         self.surf.fill(RenderSettings.bg_color)
         pygame.event.pump()
         
@@ -724,13 +765,12 @@ class TaskEnv:
             text_rect = text_surface.get_rect(center=(task_x, task_y))
             self.surf.blit(text_surface, text_rect)
             
-            # # 显示任务当前status
-            # status_str = np.array2string(task['status'], precision=1, separator=',')
-            # status_text = small_font.render(status_str, True, (50, 50, 50))
-            # status_rect = status_text.get_rect(center=(task_x, task_y + RenderSettings.landmark_size + 15))
-            # self.surf.blit(status_text, status_rect)
+            # 显示任务当前status
+            status_str = np.array2string(task['status'], precision=1, separator=',')
+            status_text = small_font.render(status_str, True, (50, 50, 50))
+            status_rect = status_text.get_rect(center=(task_x, task_y + RenderSettings.landmark_size + 15))
+            self.surf.blit(status_text, status_rect)
             
-                
         pygame.event.pump()
         # 渲染所有智能体（跳过已禁用的智能体）
         for agent_id, agent in self.agent_dic.items():
@@ -786,13 +826,13 @@ class TaskEnv:
             text_rect = text_surface.get_rect(center=(depot_x, depot_y))
             self.surf.blit(text_surface, text_rect)
             
-            # # 显示物种能力
-            # species_id = depot_id
-            # if 0 <= species_id < len(self.species_dict['abilities']):
-            #     ability_str = np.array2string(self.species_dict['abilities'][species_id], precision=1, separator=',')
-            #     ability_text = small_font.render(ability_str, True, (50, 50, 50))
-            #     ability_rect = ability_text.get_rect(center=(depot_x, depot_y + square_size + 15))
-            #     self.surf.blit(ability_text, ability_rect)
+            # 显示物种能力
+            species_id = depot_id
+            if 0 <= species_id < len(self.species_dict['abilities']):
+                ability_str = np.array2string(self.species_dict['abilities'][species_id], precision=1, separator=',')
+                ability_text = small_font.render(ability_str, True, (50, 50, 50))
+                ability_rect = ability_text.get_rect(center=(depot_x, depot_y + square_size + 15))
+                self.surf.blit(ability_text, ability_rect)
         
         # 将绘制表面显示到屏幕
         self.screen.blit(self.surf, (0, 0))
@@ -867,11 +907,10 @@ class TaskEnv:
             
         # 打印一些关键信息用于调试
         moving_agents = 0
-        
+
         for agent_id, agent in self.agent_dic.items():
             # 调试输出当前任务和预设路由
             has_route = agent['pre_set_route'] is not None and len(agent['pre_set_route']) > 0
-            
             if agent['current_task'] < 0:  # 当前在depot或无任务
                 if has_route:
                     # 将下一个任务设为当前任务
@@ -896,14 +935,12 @@ class TaskEnv:
                         agent['current_task'] = depot_id
                         print(f"智能体 {agent_id} 完成所有任务，返回depot {depot_id}")
                         moving_agents += 1
-            
+
             # 执行移动
             self.agent_step_every_time(agent_id, agent['current_task'])
-            
+
         # 检查是否完成或出现死锁
         self.check_finished_every_time()
-        
-        return 0
 
     def agent_step_every_time(self, agent_id, task_id):
         # 如果智能体已被禁用，则跳过处理
@@ -967,7 +1004,7 @@ class TaskEnv:
         # 更新任务状态
         self.task_update_every_time(task['ID'])
         return 0, True, []
-
+    
     def task_update_every_time(self, task_id):
         if task_id < 0:
             return
@@ -1014,128 +1051,44 @@ class TaskEnv:
         unfinished_tasks = [t for t_id, t in self.task_dic.items() if not t['finished']]
         if not unfinished_tasks:
             return False  # 没有未完成任务，不存在死锁
-            
+        
         # 2. 检查所有智能体状态
         all_agents_waiting_or_returned = True
         for agent_id, agent in self.agent_dic.items():
             # 跳过被禁用的智能体
             if agent_id in self.disabled_agents:
                 continue
-                
-            # 如果智能体正在执行任务，则不是死锁
-            if agent['current_task'] >= 0 and self.task_dic[agent['current_task']]['feasible_assignment'] and not self.task_dic[agent['current_task']]['finished']: # feasible_assignment表示任务可行，此时不再死锁
+            # 如果智能体正在执行任务，则不是死锁，feasible_assignment表示任务可行，此时不再死锁
+            if agent['current_task'] >= 0 and self.task_dic[agent['current_task']]['feasible_assignment'] and not self.task_dic[agent['current_task']]['finished']:
                 all_agents_waiting_or_returned = False
                 break
-        
+
         # 3. 死锁条件：有未完成任务，但所有智能体都在等待或已返回仓库
         return all_agents_waiting_or_returned and len(unfinished_tasks) > 0
 
-    def resolve_deadlock(self):
-        """解决死锁：重新分配任务给智能体"""
-        # print("检测到死锁情况，重新分配任务...")
-        
-        # 1. 找出所有已返回仓库的智能体
-        available_agents = []
-        for agent_id, agent in self.agent_dic.items():
-            if agent_id in self.disabled_agents:
-                continue
-            
-            if agent['returned'] or (agent['current_task'] < 0):
-                # 重置智能体状态，使其可以接受新任务
-                agent['returned'] = False
-                agent['assigned'] = False
-                agent['no_choice'] = False
-                available_agents.append(agent_id)
-        
-        # 2. 找出所有未完成且未分配的任务
-        unassigned_tasks = []
-        for task_id, task in self.task_dic.items():
-            if not task['finished'] and not task['feasible_assignment']:
-                unassigned_tasks.append(task_id)
-        
-        # 3. 如果有可用智能体和未分配任务，进行任务重分配
-        if available_agents and unassigned_tasks:
-            # print(f"有 {len(available_agents)} 个可用智能体和 {len(unassigned_tasks)} 个未分配任务")
-            return True  # 表示需要重新分配任务
-        
-        return False  # 无法解决死锁
+    
+if __name__ == '__main__':
+    import pickle
+    import os
 
-    def force_reassign_tasks(self):
-        """强制重新分配任务以解决死锁"""
-        # 找出所有可用的智能体（已返回仓库或空闲的）
-        available_agents = []
-        for agent_id, agent in self.agent_dic.items():
-            if agent_id in self.disabled_agents:
-                continue
-                
-            if agent['returned'] or agent['current_task'] < 0:
-                available_agents.append(agent_id)
-                
-        # 找出所有未完成的任务
-        unfinished_tasks = []
-        for task_id, task in self.task_dic.items():
-            if not task['finished']:
-                unfinished_tasks.append(task_id)
-                
-        if not available_agents or not unfinished_tasks:
-            return False
-            
-        # 创建任务-智能体匹配表，记录每个智能体可以执行哪些任务
-        task_agent_matches = {}
-        for task_id in unfinished_tasks:
-            task = self.task_dic[task_id]
-            task_agent_matches[task_id] = []
-            
-            for agent_id in available_agents:
-                agent = self.agent_dic[agent_id]
-                # 检查智能体能力是否可以贡献给任务
-                if any((task['requirements'] > 0) & (agent['abilities'] > 0)):
-                    task_agent_matches[task_id].append(agent_id)
-        
-        # 根据匹配表进行任务分配，优先分配匹配智能体较少的任务
-        tasks_by_match_count = sorted(task_agent_matches.keys(), 
-                                      key=lambda t: len(task_agent_matches[t]))
-        
-        assigned_agents = set()
-        for task_id in tasks_by_match_count:
-            if not task_agent_matches[task_id]:
-                continue  # 没有匹配的智能体
-                
-            # 为任务找到最合适的智能体组合
-            task = self.task_dic[task_id]
-            requirements = task['requirements'].copy()
-            
-            potential_agents = [a for a in task_agent_matches[task_id] 
-                              if a not in assigned_agents]
-            
-            if not potential_agents:
-                continue  # 没有可用的智能体
-                
-            selected_agents = []
-            for agent_id in potential_agents:
-                agent = self.agent_dic[agent_id]
-                
-                # 如果智能体能够满足任务需求
-                contribution = np.minimum(requirements, agent['abilities'])
-                if np.any(contribution > 0):
-                    selected_agents.append(agent_id)
-                    requirements = np.maximum(requirements - agent['abilities'], 0)
-                    
-                    # 如果任务需求已满足，退出循环
-                    if np.all(requirements <= 0):
-                        break
-            
-            # 更新任务和智能体状态
-            if selected_agents:
-                # print(f"强制分配任务 {task_id} 给智能体: {selected_agents}")
-                for agent_id in selected_agents:
-                    # 重置智能体状态
-                    agent = self.agent_dic[agent_id]
-                    agent['returned'] = False
-                    agent['no_choice'] = False
-                    agent['pre_set_route'] = [task_id]  # 设置预定路线
-                    agent['current_task'] = task_id
-                    self.agent_step_every_time(agent_id, agent['current_task'])
-                    assigned_agents.add(agent_id)
-        
-        return len(assigned_agents) > 0
+    # 定义测试集目录名
+    testSet = 'RALTestSet'
+
+    # 获取当前文件所在目录的上一级目录的绝对路径
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+     # 创建目标目录（如果不存在）
+    target_dir = os.path.join(base_dir, testSet)
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+        print(f"创建目录: {target_dir}")
+
+    # 创建环境对象
+    i = 52
+    env = TaskEnv((3, 3), (5, 5), (20, 20), 5, seed=i, single_ability=True)
+    # 保存环境对象到文件
+    output_file = os.path.join(target_dir, f'env_{i}.pkl')
+    with open(output_file, 'wb') as f:
+        pickle.dump(env, f)
+
+    print(f"环境对象已保存到: {output_file}")

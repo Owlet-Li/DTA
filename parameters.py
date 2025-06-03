@@ -25,6 +25,7 @@ class TrainParams:
     SUMMARY_WINDOW = 8
     INCREASE_DIFFICULTY = 20000
     EVALUATE = True
+    DEADLOCK_CHECK_INTERVAL = 10
 
 class SaverParams:
     FOLDER_NAME = 'save_5'

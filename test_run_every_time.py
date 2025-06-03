@@ -7,14 +7,15 @@ import time
 import pandas as pd
 from natsort import natsorted
 import glob
+from env.task_env import TaskEnv
 
 USE_GPU = False
 USE_GPU_GLOBAL = True
 FOLDER_NAME = 'save'
 testSet = 'RALTestSet'
 model_path = f'model/{FOLDER_NAME}'
-sampling = False
-sampling_num = 10 if sampling else 1
+sampling = True
+sampling_num = 1 if sampling else 1
 max_task = False
 
 def main(f):
@@ -44,4 +45,4 @@ def main(f):
 
 if __name__ == "__main__":
     files = natsorted(glob.glob(f'{testSet}/env*.pkl'), key=lambda y: y.lower())
-    main(files[1])
+    main(files[52])

@@ -122,4 +122,4 @@ if __name__ == "__main__":
         files = natsorted(glob.glob(f'{testSet}/env*.pkl'), key=lambda y: y.lower())
     
     # 直接运行单个环境进行测试
-    main(files[0])
+    main(files[51])
