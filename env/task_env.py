@@ -14,7 +14,7 @@ class RenderSettings:
     animation_speed = 0.5  # 动画速度调整系数，减小以放慢动画速度
 
 class TaskEnv:
-    def __init__(self, per_species_range=(10, 10), species_range=(5, 5), tasks_range=(30, 30), traits_dim=5, decision_dim=10, max_task_size=2, duration_scale=5, seed=None, plot_figure=False, single_ability=False):
+    def __init__(self, per_species_range=(10, 10), species_range=(5, 5), tasks_range=(30, 30), traits_dim=5, decision_dim=10, max_task_size=2, duration_scale=5, seed=None, plot_figure=False, single_ability=False, heterogeneous_speed=False):
         self.rng = None
         if seed is not None:
             self.rng = np.random.default_rng(seed) 
@@ -25,6 +25,7 @@ class TaskEnv:
         self.max_task_size = max_task_size # 每个任务的最大能力值
         self.duration_scale = duration_scale # 任务持续时间缩放因子
         self.single_ability = single_ability # 是否使用单一能力模式
+        self.heterogeneous_speed = heterogeneous_speed # 是否使用速度异构模式
 
         self.task_dic, self.agent_dic, self.depot_dic, self.species_dict = self.generate_env()
         self.species_distance_matrix, self.species_neighbor_matrix = self.generate_distance_matrix() 
@@ -82,6 +83,14 @@ class TaskEnv:
             agents_ini = self.generate_agent(species_num)
             tasks_ini = self.generate_task(tasks_num, species_num, agents_species_num)
 
+        # 生成每个物种的速度
+        if self.heterogeneous_speed:
+            # 速度异构模式：为每个物种生成不同的速度，范围在0.1到0.4之间
+            species_velocities = self.random_value(species_num, 1).flatten() * 0.3 + 0.1  # 范围[0.1, 0.4]
+        else:
+            # 原始模式：所有物种速度相同
+            species_velocities = np.full(species_num, 0.2)
+
         depot_loc = self.random_value(species_num, 2)
         cost_ini = [self.random_value(1, 1) for _ in range(species_num)]
         tasks_loc = self.random_value(tasks_num, 2)
@@ -93,6 +102,7 @@ class TaskEnv:
         species_dict = dict()
         species_dict['abilities'] = agents_ini
         species_dict['number'] = agents_species_num
+        species_dict['velocities'] = species_velocities
 
         for i in range(tasks_num):
             task_dic[i] = {'ID': i,                                    # 任务的唯一标识符
@@ -126,7 +136,7 @@ class TaskEnv:
                                 'arrival_time': [0.],                      # 智能体到达路径中各个位置的时间列表
                                 'cost': cost_ini[s],                       # 智能体的运营成本
                                 'travel_time': 0,                          # 智能体当前行程的旅行时间
-                                'velocity': 0.2,                           # 智能体的移动速度
+                                'velocity': species_velocities[s],         # 智能体的移动速度（基于物种）
                                 'next_decision': 0,                        # 智能体下一次需要做决策的时间点
                                 'depot': depot_loc[s, :],                  # 智能体所属仓库的位置坐标
                                 'travel_dist': 0,                          # 智能体累计的旅行距离
@@ -258,16 +268,33 @@ class TaskEnv:
         release_agents = (finished_agents, blocked_agents)
         return release_agents, next_decision
 
-    def agent_observe(self, agent_id, max_waiting=False):
+    def agent_observe(self, agent_id, max_waiting=False, cooperation=False, cooperation_threshold=1):
         agent = self.agent_dic[agent_id]
         mask = self.get_unfinished_task_mask()
         contributable_mask = self.get_contributable_task_mask(agent_id)
         mask = np.logical_or(mask, contributable_mask)
+        
         if max_waiting:
             waiting_tasks_mask, waiting_agents = self.get_waiting_tasks()
             waiting_len = np.sum(waiting_tasks_mask == 0)
             if waiting_len > 5:
                 mask = np.logical_or(mask, waiting_tasks_mask)
+        elif cooperation:
+            # Cooperation分支：只有当该智能体能贡献的任务中等待任务数量超过阈值时才启用合作
+            waiting_tasks_mask, waiting_agents = self.get_waiting_tasks()
+            
+            # 获取该智能体能够贡献的等待任务
+            contributable_waiting_tasks = np.logical_and(~contributable_mask, ~waiting_tasks_mask)
+            contributable_waiting_len = np.sum(contributable_waiting_tasks)
+            
+            # 只有当该智能体能贡献的等待任务超过阈值时，才将这些任务设为可选择（mask为False）
+            if contributable_waiting_len > cooperation_threshold:
+                # 让智能体能够贡献的等待任务变为可选择（取消掩码）
+                mask[contributable_waiting_tasks] = False
+                print(f"智能体 {agent_id} 启用合作模式：能贡献的等待任务数 = {contributable_waiting_len}")
+            else:
+                print(f"智能体 {agent_id} 未启用合作模式：能贡献的等待任务数 = {contributable_waiting_len} <= {cooperation_threshold}")
+        
         mask = np.insert(mask, 0, False)
         agents_info = np.expand_dims(self.get_current_agent_status(agent), axis=0)
         tasks_info = np.expand_dims(self.get_current_task_status(agent), axis=0)
@@ -692,11 +719,11 @@ class TaskEnv:
                     print("暂停状态：", "已暂停" if self.paused else "运行中")
                 elif hasattr(pygame, 'K_UP') and event.key == getattr(pygame, 'K_UP'):
                     # 加快动画速度
-                    RenderSettings.animation_speed = min(1.0, RenderSettings.animation_speed * 1.2)
+                    RenderSettings.animation_speed = min(5.0, RenderSettings.animation_speed * 1.2)
                     print(f"动画速度: {RenderSettings.animation_speed:.2f}")
                 elif hasattr(pygame, 'K_DOWN') and event.key == getattr(pygame, 'K_DOWN'):
                     # 减慢动画速度
-                    RenderSettings.animation_speed = max(0.02, RenderSettings.animation_speed / 1.2)
+                    RenderSettings.animation_speed = max(0.1, RenderSettings.animation_speed / 1.2)
                     print(f"动画速度: {RenderSettings.animation_speed:.2f}")
                 elif hasattr(pygame, 'K_ESCAPE') and event.key == getattr(pygame, 'K_ESCAPE'):
                     # ESC键退出
@@ -826,13 +853,20 @@ class TaskEnv:
             text_rect = text_surface.get_rect(center=(depot_x, depot_y))
             self.surf.blit(text_surface, text_rect)
             
-            # 显示物种能力
+            # 显示物种能力和速度
             species_id = depot_id
             if 0 <= species_id < len(self.species_dict['abilities']):
                 ability_str = np.array2string(self.species_dict['abilities'][species_id], precision=1, separator=',')
                 ability_text = small_font.render(ability_str, True, (50, 50, 50))
                 ability_rect = ability_text.get_rect(center=(depot_x, depot_y + square_size + 15))
                 self.surf.blit(ability_text, ability_rect)
+                
+                # 如果启用了速度异构，显示速度信息
+                if self.heterogeneous_speed and 'velocities' in self.species_dict:
+                    velocity_str = f"v:{self.species_dict['velocities'][species_id]:.2f}"
+                    velocity_text = small_font.render(velocity_str, True, (0, 100, 0))
+                    velocity_rect = velocity_text.get_rect(center=(depot_x, depot_y + square_size + 30))
+                    self.surf.blit(velocity_text, velocity_rect)
         
         # 将绘制表面显示到屏幕
         self.screen.blit(self.surf, (0, 0))
@@ -1084,8 +1118,9 @@ if __name__ == '__main__':
         print(f"创建目录: {target_dir}")
 
     # 创建环境对象
-    i = 52
-    env = TaskEnv((3, 3), (5, 5), (20, 20), 5, seed=i, single_ability=True)
+    i = 5
+    # 可以选择是否启用速度异构：heterogeneous_speed=True 启用，heterogeneous_speed=False 或不设置则使用原始统一速度
+    env = TaskEnv(per_species_range=(10, 10), species_range=(1, 1), tasks_range=(20, 20), traits_dim=5, decision_dim=10, max_task_size=1, duration_scale=10, seed=i, single_ability=True, heterogeneous_speed=True)
     # 保存环境对象到文件
     output_file = os.path.join(target_dir, f'env_{i}.pkl')
     with open(output_file, 'wb') as f:

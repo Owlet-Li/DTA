@@ -166,7 +166,7 @@ class Worker:
         mask = F.pad(mask, (0, EnvParams.TASKS_RANGE[1] + 1 - mask.shape[1]), 'constant', 1)
         return task_info, agents, mask
 
-    def run_episode_every_time(self, training=True, sample=False, max_waiting=False, render=False):
+    def run_episode_every_time(self, training=True, sample=False, max_waiting=False, cooperation=False, render=False):
         buffer_dict = {idx:[] for idx in range(7)}
         perf_metrics = {}
 
@@ -208,7 +208,7 @@ class Worker:
                     elif agent['current_task'] >= 0 and not self.env.task_dic[agent['current_task']]['finished']:
                         self.env.agent_step_every_time(agent_id, agent['current_task'])
 
-                # 定期检查死锁或在新增任务后检查，问题，有事强制重新分配不一定能完全解决问题，特别是面对argmax的情况
+                # 定期检查死锁或在新增任务后检查，问题，有事强制重新分配不一定能完全解决问题，特别是面对argmax的情况，需要加一个掩码让他们不能选择目前选择的任务
                 deadlock_check_counter += 1
                 if deadlock_check_counter >= deadlock_check_interval:
                     deadlock_check_counter = 0
@@ -218,9 +218,29 @@ class Worker:
                         # 如果检测到死锁，尝试解决
                         if render:
                             print(f"时间 {self.env.current_time:.2f}: 检测到死锁")
+                        
+                        # 清空未完成任务的成员列表和相关状态
+                        for task_id, task in self.env.task_dic.items():
+                            # 跳过已经完成的任务
+                            if task['finished']:
+                                continue
+                            if render and len(task['members']) > 0:
+                                print(f"时间 {self.env.current_time:.2f}: 清空任务 {task_id} 的成员列表: {task['members']}")
+                            task['members'] = []  # 清空成员列表
+                            task['feasible_assignment'] = False  # 重置可行性标志
+                            task['status'] = task['requirements'].copy()  # 重置状态为初始需求
+                            task['abandoned_agent'] = []  # 清空放弃的智能体列表
+                            task['sum_waiting_time'] = 0  # 重置等待时间
+                            task['time_start'] = 0  # 重置开始时间
+                            task['time_finish'] = 0  # 重置结束时间
+                        
+                        # 重置智能体的分配状态
                         for agent_id, agent in self.env.agent_dic.items():
                             if agent_id in self.env.disabled_agents:
                                 continue
+                            # 重置智能体的分配状态
+                            agent['assigned'] = False
+                            agent['sum_waiting_time'] = 0
                             release_agents.append(agent_id)
                             if render:
                                 print(f"时间 {self.env.current_time:.2f}: 强制将智能体 {agent_id} 添加到决策队列")
@@ -229,7 +249,7 @@ class Worker:
                 while release_agents:
                     agent_id = release_agents.pop(0)      
                     agent = self.env.agent_dic[agent_id]
-                    task_info, total_agents, mask = self.convert_torch(self.env.agent_observe(agent_id, max_waiting))
+                    task_info, total_agents, mask = self.convert_torch(self.env.agent_observe(agent_id, max_waiting, cooperation))
                     block_flag = mask[0, 1:].all().item()
                     if block_flag and not np.all(self.env.get_matrix(self.env.task_dic, 'feasible_assignment')):
                         agent['no_choice'] = block_flag

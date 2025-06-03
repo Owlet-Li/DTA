@@ -8,15 +8,19 @@ import pandas as pd
 from natsort import natsorted
 import glob
 from env.task_env import TaskEnv
+import os
 
 USE_GPU = False
 USE_GPU_GLOBAL = True
 FOLDER_NAME = 'save'
 testSet = 'RALTestSet'
 model_path = f'model/{FOLDER_NAME}'
-sampling = True
-sampling_num = 1 if sampling else 1
-max_task = False
+training = False
+sample = True
+sampling_num = 1 if sample else 1
+max_waiting = False
+cooperation = True
+render = True
 
 def main(f):
     device = torch.device('cuda:0') if USE_GPU_GLOBAL else torch.device('cpu')
@@ -31,7 +35,7 @@ def main(f):
     for i in range(sampling_num):
         env.init_state()
         worker.env = env
-        _, _, results = worker.run_episode_every_time(False, sampling, max_task, render=True)
+        _, _, results = worker.run_episode_every_time(training=training, sample=sample, max_waiting=max_waiting, cooperation=cooperation, render=render)
         # print(results)
         if results_best is None:
             results_best = results
@@ -44,5 +48,27 @@ def main(f):
     return df_, end
 
 if __name__ == "__main__":
-    files = natsorted(glob.glob(f'{testSet}/env*.pkl'), key=lambda y: y.lower())
-    main(files[52])
+    # 确保存在测试集文件夹
+    if not os.path.exists(testSet):
+        try:
+            os.makedirs(testSet)
+        except:
+            pass
+
+    # 指定要使用的测试环境序号
+    i = 6
+    target_file = f'{testSet}/env_{i}.pkl'
+    
+    # 检查指定序号的测试环境文件是否存在
+    if not os.path.exists(target_file):
+        print(f"创建测试环境文件 env_{i}.pkl...")
+        os.makedirs(testSet, exist_ok=True)
+        env = TaskEnv(per_species_range=(5, 10), species_range=(1, 5), tasks_range=(20, 20), traits_dim=5, decision_dim=10, max_task_size=5, duration_scale=1, seed=i, single_ability=True, heterogeneous_speed=True)
+        with open(target_file, 'wb') as f:
+            pickle.dump(env, f)
+        print(f"测试环境文件 env_{i}.pkl 创建完成")
+    else:
+        print(f"找到已存在的测试环境文件 env_{i}.pkl")
+    
+    # 直接运行指定序号的环境进行测试
+    main(target_file)

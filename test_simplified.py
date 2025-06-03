@@ -109,17 +109,20 @@ if __name__ == "__main__":
         except:
             pass
 
-    files = natsorted(glob.glob(f'{testSet}/env*.pkl'), key=lambda y: y.lower())
+    # 指定要使用的测试环境序号
+    i = 1  
+    target_file = f'{testSet}/env_{i}.pkl'
     
-    # 检查是否有可用的测试环境文件
-    if not files:
-        print(f"创建测试环境文件...")
+    # 检查指定序号的测试环境文件是否存在
+    if not os.path.exists(target_file):
+        print(f"创建测试环境文件 env_{i}.pkl...")
         os.makedirs(testSet, exist_ok=True)
-        for i in range(1):  # 只创建一个环境进行测试
-            env = TaskEnv((3, 3), (5, 5), (20, 20), 5, seed=i)
-            with open(f'{testSet}/env_{i}.pkl', 'wb') as f:
-                pickle.dump(env, open(f'{testSet}/env_{i}.pkl', 'wb'))
-        files = natsorted(glob.glob(f'{testSet}/env*.pkl'), key=lambda y: y.lower())
+        env = TaskEnv(per_species_range=(1, 10), species_range=(1, 5), tasks_range=(1, 20), traits_dim=5, decision_dim=10, max_task_size=5, duration_scale=1, seed=i, single_ability=True, heterogeneous_speed=True)
+        with open(target_file, 'wb') as f:
+            pickle.dump(env, f)
+        print(f"测试环境文件 env_{i}.pkl 创建完成")
+    else:
+        print(f"找到已存在的测试环境文件 env_{i}.pkl")
     
-    # 直接运行单个环境进行测试
-    main(files[51])
+    # 直接运行指定序号的环境进行测试
+    main(target_file)
