@@ -1,10 +1,13 @@
-import torch
-from parameters import *
-from attention import AttentionNet
 import ray
+from parameters import *
+import torch
+from attention import AttentionNet
 from worker import Worker
 
 class Runner(object):
+    """Actor object to start running simulation on workers.
+    Gradient computation is also executed on this object."""
+
     def __init__(self, metaAgentID):
         self.metaAgentID = metaAgentID
         self.device = torch.device('cuda') if TrainParams.USE_GPU else torch.device('cpu')
@@ -24,10 +27,8 @@ class Runner(object):
         # set the local weights to the global weight values from the master network
         self.set_weights(global_weights)
         self.set_baseline_weights(baseline_weights)
-        save_img = False
-        worker = Worker(self.metaAgentID, self.localNetwork, self.localBaseline,
-                        curr_episode, self.device, save_img, None, env_params)
-        worker.work(curr_episode)
+        worker = Worker(mete_agent_id=self.metaAgentID, local_network=self.localNetwork, local_baseline=self.localBaseline, global_step=curr_episode, device=self.device, save_image=False, seed=None, env_params=env_params)
+        worker.work(curr_episode, use_time_driven=False)
 
         buffer = worker.experience
         perf_metrics = worker.perf_metrics
@@ -38,12 +39,6 @@ class Runner(object):
         }
 
         return buffer, perf_metrics, info
-
-    def testing(self, seed=None):
-        worker = Worker(self.metaAgentID, self.localNetwork, self.localBaseline,
-                        0, self.device, False, seed)
-        reward = worker.baseline_test()
-        return reward, seed, self.metaAgentID
 
 @ray.remote(num_cpus=1, num_gpus=TrainParams.NUM_GPU / TrainParams.NUM_META_AGENT)
 class RLRunner(Runner):

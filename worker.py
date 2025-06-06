@@ -16,7 +16,7 @@ class Worker:
         self.save_image = save_image
         if env_params is None:
             env_params = [EnvParams.SPECIES_AGENTS_RANGE, EnvParams.SPECIES_RANGE, EnvParams.TASKS_RANGE]
-        self.env = TaskEnv(*env_params, EnvParams.TRAIT_DIM, EnvParams.DECISION_DIM, seed=seed, plot_figure=save_image)
+        self.env = TaskEnv(*env_params, traits_dim=EnvParams.TRAIT_DIM, max_task_size=2, duration_scale=5, seed=seed, single_ability=False, heterogeneous_speed=False)
         self.baseline_env = copy.deepcopy(self.env)
         self.local_baseline = local_baseline
         self.local_net = local_network
@@ -25,7 +25,20 @@ class Worker:
         self.perf_metrics = {}
         self.max_time = EnvParams.MAX_TIME
 
-    def run_episode(self, training=True, sample=False, max_waiting=False):
+    def convert_torch(self, args):
+        data = []
+        for arg in args:
+            data.append(torch.tensor(arg, dtype=torch.float).to(self.device))
+        return data
+
+    @staticmethod
+    def obs_padding(task_info, agents, mask):
+        task_info = F.pad(task_info, (0, 0, 0, EnvParams.TASKS_RANGE[1] + 1 - task_info.shape[1]), 'constant', 0)
+        agents = F.pad(agents, (0, 0, 0, EnvParams.SPECIES_AGENTS_RANGE[1] * EnvParams.SPECIES_RANGE[1] - agents.shape[1]), 'constant', 0)
+        mask = F.pad(mask, (0, EnvParams.TASKS_RANGE[1] + 1 - mask.shape[1]), 'constant', 1)
+        return task_info, agents, mask
+
+    def run_episode(self, training=True, sample=False, max_waiting=False, cooperation=False, render=False, disable_mask=False):
         buffer_dict = {idx:[] for idx in range(7)}
         perf_metrics = {}
         current_action_index = 0
@@ -39,7 +52,7 @@ class Worker:
                 while release_agents[0] or release_agents[1]:
                     agent_id = release_agents[0].pop(0) if release_agents[0] else release_agents[1].pop(0)
                     agent = self.env.agent_dic[agent_id]
-                    task_info, total_agents, mask = self.convert_torch(self.env.agent_observe(agent_id, max_waiting))
+                    task_info, total_agents, mask = self.convert_torch(self.env.agent_observe(agent_id, max_waiting=max_waiting, cooperation=cooperation, cooperation_threshold=1, disable_mask=disable_mask))
                     block_flag = mask[0, 1:].all().item()
                     if block_flag and not np.all(self.env.get_matrix(self.env.task_dic, 'feasible_assignment')):
                         agent['no_choice'] = block_flag
@@ -84,89 +97,7 @@ class Worker:
         perf_metrics['efficiency'] = [self.env.get_efficiency()]
         return terminal_reward, buffer_dict, perf_metrics
 
-    def baseline_test(self):
-        self.baseline_env.plot_figure = False
-        perf_metrics = {}
-        current_action_index = 0
-        start = time.time()
-        while not self.baseline_env.finished and self.baseline_env.current_time < self.max_time and current_action_index < 300:
-            with torch.no_grad():
-                release_agents, current_time = self.baseline_env.next_decision()
-                random.shuffle(release_agents[0])
-                self.baseline_env.current_time = current_time
-                if time.time() - start > 30:
-                    break
-                while release_agents[0] or release_agents[1]:
-                    agent_id = release_agents[0].pop(0) if release_agents[0] else release_agents[1].pop(0)
-                    agent = self.baseline_env.agent_dic[agent_id]
-                    task_info, total_agents, mask = self.convert_torch(self.baseline_env.agent_observe(agent_id, False))
-                    return_flag = mask[0, 1:].all().item()
-                    if return_flag and not np.all(self.baseline_env.get_matrix(self.baseline_env.task_dic, 'feasible_assignment')): ## add condition on returning to depot
-                        self.baseline_env.agent_dic[agent_id]['no_choice'] = return_flag
-                        continue
-                    elif return_flag and np.all(self.baseline_env.get_matrix(self.baseline_env.task_dic, 'feasible_assignment')) and agent['current_task'] < 0:
-                        continue
-                    task_info, total_agents, mask = self.obs_padding(task_info, total_agents, mask)
-                    index = torch.LongTensor([agent_id]).reshape(1, 1, 1).to(self.device)
-                    probs, _ = self.local_baseline(task_info, total_agents, mask, index)
-                    action = torch.argmax(probs, 1)
-                    self.baseline_env.agent_step(agent_id, action.item(), None)
-                    current_action_index += 1
-                self.baseline_env.finished = self.baseline_env.check_finished()
-
-        reward, finished_tasks = self.baseline_env.get_episode_reward(self.max_time)
-        return reward
-
-    def work(self, episode_number):
-        baseline_rewards = []
-        buffers = []
-        metrics = []
-        max_waiting = TrainParams.FORCE_MAX_OPEN_TASK
-        for _ in range(TrainParams.POMO_SIZE):
-            self.env.init_state()
-            
-            terminal_reward, buffer, perf_metrics = self.run_episode(training=True, sample=True, max_waiting=max_waiting)
-                
-            if terminal_reward is np.nan:
-                max_waiting = True
-                continue
-            baseline_rewards.append(terminal_reward)
-            buffers.append(buffer)
-            metrics.append(perf_metrics)
-        baseline_reward = np.nanmean(baseline_rewards)
-
-        for idx, buffer in enumerate(buffers):
-            for key in buffer.keys():
-                if key == 6:
-                    for i in range(len(buffer[key])):
-                        buffer[key][i] += baseline_rewards[idx] - baseline_reward
-                if key not in self.experience.keys():
-                    self.experience[key] = buffer[key]
-                else:
-                    self.experience[key] += buffer[key]
-
-        for metric in metrics:
-            for key in metric.keys():
-                if key not in self.perf_metrics.keys():
-                    self.perf_metrics[key] = metric[key]
-                else:
-                    self.perf_metrics[key] += metric[key]
-        self.episode_number = episode_number
-
-    def convert_torch(self, args):
-        data = []
-        for arg in args:
-            data.append(torch.tensor(arg, dtype=torch.float).to(self.device))
-        return data
-
-    @staticmethod
-    def obs_padding(task_info, agents, mask):
-        task_info = F.pad(task_info, (0, 0, 0, EnvParams.TASKS_RANGE[1] + 1 - task_info.shape[1]), 'constant', 0)
-        agents = F.pad(agents, (0, 0, 0, EnvParams.SPECIES_AGENTS_RANGE[1] * EnvParams.SPECIES_RANGE[1] - agents.shape[1]), 'constant', 0)
-        mask = F.pad(mask, (0, EnvParams.TASKS_RANGE[1] + 1 - mask.shape[1]), 'constant', 1)
-        return task_info, agents, mask
-
-    def run_episode_every_time(self, training=True, sample=False, max_waiting=False, cooperation=False, render=False):
+    def run_episode_every_time(self, training=True, sample=False, max_waiting=False, cooperation=False, render=False, disable_mask=False):
         buffer_dict = {idx:[] for idx in range(7)}
         perf_metrics = {}
 
@@ -249,7 +180,7 @@ class Worker:
                 while release_agents:
                     agent_id = release_agents.pop(0)      
                     agent = self.env.agent_dic[agent_id]
-                    task_info, total_agents, mask = self.convert_torch(self.env.agent_observe(agent_id, max_waiting, cooperation))
+                    task_info, total_agents, mask = self.convert_torch(self.env.agent_observe(agent_id=agent_id, max_waiting=max_waiting, cooperation=cooperation, cooperation_threshold=1, disable_mask=disable_mask))
                     block_flag = mask[0, 1:].all().item()
                     if block_flag and not np.all(self.env.get_matrix(self.env.task_dic, 'feasible_assignment')):
                         agent['no_choice'] = block_flag
@@ -307,3 +238,46 @@ class Worker:
         perf_metrics['travel_dist'] = [np.sum(self.env.get_matrix(self.env.agent_dic, 'travel_dist'))]
         perf_metrics['efficiency'] = [self.env.get_efficiency()]
         return terminal_reward, buffer_dict, perf_metrics
+
+    def work(self, episode_number, use_time_driven=False):
+        """
+        Interacts with the environment. The agent gets either gradients or experience buffer
+        """
+        baseline_rewards = []
+        buffers = []
+        metrics = []
+        max_waiting = TrainParams.FORCE_MAX_OPEN_TASK
+        for _ in range(TrainParams.POMO_SIZE):
+            self.env.init_state()
+
+            # 根据参数选择使用哪种方法运行episode
+            if use_time_driven:
+                terminal_reward, buffer, perf_metrics = self.run_episode_every_time(training=True, sample=True, max_waiting=max_waiting, cooperation=False, render=False)
+            else:
+                terminal_reward, buffer, perf_metrics = self.run_episode(training=True, sample=True, max_waiting=max_waiting)
+
+            if terminal_reward is np.nan:
+                max_waiting = True
+                continue
+            baseline_rewards.append(terminal_reward)
+            buffers.append(buffer)
+            metrics.append(perf_metrics)
+        baseline_reward = np.nanmean(baseline_rewards)
+
+        for idx, buffer in enumerate(buffers):
+            for key in buffer.keys():
+                if key == 6:
+                    for i in range(len(buffer[key])):
+                        buffer[key][i] += baseline_rewards[idx] - baseline_reward
+                if key not in self.experience.keys():
+                    self.experience[key] = buffer[key]
+                else:
+                    self.experience[key] += buffer[key]
+
+        for metric in metrics:
+            for key in metric.keys():
+                if key not in self.perf_metrics.keys():
+                    self.perf_metrics[key] = metric[key]
+                else:
+                    self.perf_metrics[key] += metric[key]
+        self.episode_number = episode_number

@@ -117,7 +117,7 @@ if __name__ == "__main__":
     if not os.path.exists(target_file):
         print(f"创建测试环境文件 env_{i}.pkl...")
         os.makedirs(testSet, exist_ok=True)
-        env = TaskEnv(per_species_range=(1, 10), species_range=(1, 5), tasks_range=(1, 20), traits_dim=5, decision_dim=10, max_task_size=5, duration_scale=1, seed=i, single_ability=True, heterogeneous_speed=True)
+        env = TaskEnv(per_species_range=(1, 10), species_range=(1, 5), tasks_range=(1, 20), traits_dim=5, max_task_size=5, duration_scale=1, seed=i, single_ability=True, heterogeneous_speed=True)
         with open(target_file, 'wb') as f:
             pickle.dump(env, f)
         print(f"测试环境文件 env_{i}.pkl 创建完成")

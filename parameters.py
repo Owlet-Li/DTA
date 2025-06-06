@@ -4,14 +4,13 @@ class EnvParams:
     TASKS_RANGE = (15, 50)
     MAX_TIME = 200
     TRAIT_DIM = 5
-    DECISION_DIM = 30
     RENDER_MODE = "human"
 
 class TrainParams:
     FORCE_MAX_OPEN_TASK = False
     POMO_SIZE = 10
-    USE_GPU = False
-    USE_GPU_GLOBAL = True
+    USE_GPU = False # 用于worker推理
+    USE_GPU_GLOBAL = True # 用于global_network权重更新
     AGENT_INPUT_DIM = 6 + EnvParams.TRAIT_DIM
     TASK_INPUT_DIM = 5 + 2 * EnvParams.TRAIT_DIM
     EMBEDDING_DIM = 128
@@ -26,6 +25,7 @@ class TrainParams:
     INCREASE_DIFFICULTY = 20000
     EVALUATE = True
     DEADLOCK_CHECK_INTERVAL = 10
+    DISABLE_MASK = False  # 如果设为True，所有任务都可选择（mask的所有元素设为False）
 
 class SaverParams:
     FOLDER_NAME = 'save_5'

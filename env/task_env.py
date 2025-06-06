@@ -11,10 +11,10 @@ class RenderSettings:
     landmark_size = 16  # 任务标记大小
     agent_size = 8      # 智能体大小
     render_fps = 30     # 降低帧率使动画更流畅
-    animation_speed = 0.5  # 动画速度调整系数，减小以放慢动画速度
+    animation_speed = 1  # 动画速度调整系数，减小以放慢动画速度
 
 class TaskEnv:
-    def __init__(self, per_species_range=(10, 10), species_range=(5, 5), tasks_range=(30, 30), traits_dim=5, decision_dim=10, max_task_size=2, duration_scale=5, seed=None, plot_figure=False, single_ability=False, heterogeneous_speed=False):
+    def __init__(self, per_species_range=(10, 10), species_range=(5, 5), tasks_range=(30, 30), traits_dim=5, max_task_size=2, duration_scale=5, seed=None, single_ability=False, heterogeneous_speed=False):
         self.rng = None
         if seed is not None:
             self.rng = np.random.default_rng(seed) 
@@ -268,8 +268,22 @@ class TaskEnv:
         release_agents = (finished_agents, blocked_agents)
         return release_agents, next_decision
 
-    def agent_observe(self, agent_id, max_waiting=False, cooperation=False, cooperation_threshold=1):
+    def agent_observe(self, agent_id, max_waiting=False, cooperation=False, cooperation_threshold=1, disable_mask=False):
         agent = self.agent_dic[agent_id]
+        
+        # 新增分支：如果启用disable_mask，直接返回全False的mask（所有任务都可选）
+        if disable_mask:
+            # 创建一个全False的mask，长度为任务数量（所有任务都可选择）
+            mask = np.zeros(self.tasks_num, dtype=bool)
+            # 添加depot选项（在最前面插入False）
+            mask = np.insert(mask, 0, False)
+            # 获取其他信息
+            agents_info = np.expand_dims(self.get_current_agent_status(agent), axis=0)
+            tasks_info = np.expand_dims(self.get_current_task_status(agent), axis=0)
+            mask = np.expand_dims(mask, axis=0)
+            return tasks_info, agents_info, mask
+        
+        # 正常的mask构建逻辑
         mask = self.get_unfinished_task_mask()
         contributable_mask = self.get_contributable_task_mask(agent_id)
         mask = np.logical_or(mask, contributable_mask)
@@ -483,7 +497,7 @@ class TaskEnv:
             finished = False
         return finished
 
-    def get_episode_reward(self, max_time=100):
+    def get_episode_reward(self, max_time=200):
         self.calculate_waiting_time()
         eff = self.get_efficiency()
         finished_tasks = self.get_matrix(self.task_dic, 'finished')
@@ -1120,7 +1134,7 @@ if __name__ == '__main__':
     # 创建环境对象
     i = 5
     # 可以选择是否启用速度异构：heterogeneous_speed=True 启用，heterogeneous_speed=False 或不设置则使用原始统一速度
-    env = TaskEnv(per_species_range=(10, 10), species_range=(1, 1), tasks_range=(20, 20), traits_dim=5, decision_dim=10, max_task_size=1, duration_scale=10, seed=i, single_ability=True, heterogeneous_speed=True)
+    env = TaskEnv(per_species_range=(10, 10), species_range=(1, 1), tasks_range=(20, 20), traits_dim=5, max_task_size=1, duration_scale=10, seed=i, single_ability=True, heterogeneous_speed=True)
     # 保存环境对象到文件
     output_file = os.path.join(target_dir, f'env_{i}.pkl')
     with open(output_file, 'wb') as f:

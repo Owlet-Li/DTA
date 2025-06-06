@@ -1,5 +1,5 @@
-from torch.utils.tensorboard import SummaryWriter
 from parameters import *
+from torch.utils.tensorboard import SummaryWriter
 import os
 import ray
 import torch
@@ -8,10 +8,8 @@ import torch.optim as optim
 from runner import RLRunner
 import numpy as np
 from torch.distributions import Categorical
-import copy
-from scipy.stats import ttest_rel
 
-class Logger(object):
+class Logger:
     def __init__(self):
         self.global_net = None
         self.baseline_net = None
@@ -50,7 +48,7 @@ class Logger(object):
         return curr_episode, curr_level, best_perf
 
     @staticmethod
-    def generate_env_params(curr_level=None):
+    def generate_env_params(curr_level=None): # 生成环境参数，注意这个地方后面可以搞成课程学习，逐步加大环境复杂度
         per_species_num = np.random.randint(EnvParams.SPECIES_AGENTS_RANGE[0], EnvParams.SPECIES_AGENTS_RANGE[1] + 1)
         species_num = np.random.randint(EnvParams.SPECIES_RANGE[0], EnvParams.SPECIES_RANGE[1] + 1)
         tasks_num = np.random.randint(EnvParams.TASKS_RANGE[0], EnvParams.TASKS_RANGE[1] + 1)
@@ -61,6 +59,21 @@ class Logger(object):
     def generate_test_set_seed():
         test_seed = np.random.randint(low=0, high=1e8, size=TrainParams.EVALUATION_SAMPLES).tolist()
         return test_seed
+
+    def save_model(self, curr_episode, curr_level, best_perf):
+        print('Saving model', end='\n')
+        checkpoint = {"model": self.global_net.state_dict(),
+                      "best_model": self.baseline_net.state_dict(),
+                      "best_optimizer": self.optimizer.state_dict(),
+                      "optimizer": self.optimizer.state_dict(),
+                      "episode": curr_episode,
+                      "lr_decay": self.lr_decay.state_dict(),
+                      "level": curr_level,
+                      "best_perf": best_perf
+                      }
+        path_checkpoint = "./" + SaverParams.MODEL_PATH + "/checkpoint.pth"
+        torch.save(checkpoint, path_checkpoint)
+        print('Saved model', end='\n')
 
     def write_to_board(self, tensorboard_data, curr_episode):
         tensorboard_data = np.array(tensorboard_data)
@@ -81,30 +94,32 @@ class Logger(object):
         for k, v in metrics.items():
             self.writer.add_scalar(tag=k, scalar_value=v, global_step=curr_episode)
 
-    def save_model(self, curr_episode, curr_level, best_perf):
-        print('Saving model', end='\n')
-        checkpoint = {"model": self.global_net.state_dict(),
-                      "best_model": self.baseline_net.state_dict(),
-                      "best_optimizer": self.optimizer.state_dict(),
-                      "optimizer": self.optimizer.state_dict(),
-                      "episode": curr_episode,
-                      "lr_decay": self.lr_decay.state_dict(),
-                      "level": curr_level,
-                      "best_perf": best_perf
-                      }
-        path_checkpoint = "./" + SaverParams.MODEL_PATH + "/checkpoint.pth"
-        torch.save(checkpoint, path_checkpoint)
-        print('Saved model', end='\n')
-
 def fuse_two_dicts(ini_dictionary1, ini_dictionary2):
-    if ini_dictionary2 is not None:
-        merged_dict = {**ini_dictionary1, **ini_dictionary2}
-        final_dict = {}
-        for k, v in merged_dict.items():
-            final_dict[k] = ini_dictionary1[k] + v
-        return final_dict
-    else:
+    """
+    合并两个字典，将相同键的值相加（列表连接）
+    
+    Args:
+        ini_dictionary1: 第一个字典
+        ini_dictionary2: 第二个字典，可以为None
+    
+    Returns:
+        合并后的字典
+    """
+    if ini_dictionary2 is None:
         return ini_dictionary1
+    
+    final_dict = {}
+    # 获取所有唯一的键
+    all_keys = set(ini_dictionary1.keys()) | set(ini_dictionary2.keys())
+    
+    for key in all_keys:
+        # 安全地获取每个字典中的值，如果键不存在则使用空列表
+        value1 = ini_dictionary1.get(key, [])
+        value2 = ini_dictionary2.get(key, [])
+        # 将两个值相加（对于列表就是连接）
+        final_dict[key] = value1 + value2
+    
+    return final_dict
 
 def main():
     logger = Logger()
@@ -125,8 +140,10 @@ def main():
     if SaverParams.LOAD_MODEL:
         curr_episode, curr_level, best_perf = logger.load_saved_model()
 
+    # launch meta agents
     meta_agents = [RLRunner.remote(i) for i in range(TrainParams.NUM_META_AGENT)]
 
+    # get initial weights
     if device != local_device:
         weights = global_network.to(local_device).state_dict()
         baseline_weights = baseline_network.to(local_device).state_dict()
@@ -138,6 +155,7 @@ def main():
     weights_memory = ray.put(weights)
     baseline_weights_memory = ray.put(baseline_weights)
 
+    # launch the first job on each runner
     jobs = []
 
     env_params = logger.generate_env_params(curr_level)
@@ -152,6 +170,7 @@ def main():
 
     try:
         while True:
+            # wait for any job to be completed
             done_id, jobs = ray.wait(jobs)
             done_job = ray.get(done_id)[0]
             buffer, metrics, info = done_job
@@ -181,6 +200,7 @@ def main():
                     index = torch.stack(rollouts[5]).to(device)
                     advantage_batch = torch.stack(rollouts[6], dim=0).to(device)  # (batch,1,1)
 
+                    # REINFORCE
                     probs, _ = global_network(task_inputs, agent_inputs, global_mask_batch, index)
                     dist = Categorical(probs)
                     logp = dist.log_prob(action_batch.flatten())
@@ -202,9 +222,9 @@ def main():
                 for k, v in perf_metrics.items():
                     perf_data.append(np.nanmean(perf_metrics[k]))
                     del v[:]
-                train_metrics = np.nanmean(train_metrics, axis=0)
                 for v in perf_metrics.values():
                     del v[:]
+                train_metrics = np.nanmean(train_metrics, axis=0)
                 data = [*train_metrics, *perf_data]
                 training_data.append(data)
 
@@ -212,6 +232,7 @@ def main():
                 logger.write_to_board(training_data, curr_episode)
                 training_data = []
 
+            # get the updated global weights
             if update_done:
                 if device != local_device:
                     weights = global_network.to(local_device).state_dict()
@@ -235,89 +256,7 @@ def main():
             if curr_episode % 512 == 0:
                 logger.save_model(curr_episode, curr_level, best_perf)
 
-            if TrainParams.EVALUATE:
-                if curr_episode % 1024 == 0:
-                    # stop the training
-                    ray.wait(jobs, num_returns=TrainParams.NUM_META_AGENT)
-                    for a in meta_agents:
-                        ray.kill(a)
-                    print('Evaluate baseline model at ', curr_episode)
-
-                    if baseline_value is None:
-                        test_agent_list = [RLRunner.remote(metaAgentID=i) for i in range(TrainParams.NUM_META_AGENT)]
-                        for _, test_agent in enumerate(test_agent_list):
-                            ray.get(test_agent.set_baseline_weights.remote(baseline_weights_memory))
-                        rewards = dict()
-                        seed_list = copy.deepcopy(test_set)
-                        evaluate_jobs = [test_agent_list[i].testing.remote(seed=seed_list.pop()) for i in range(TrainParams.NUM_META_AGENT)]
-                        while True:
-                            test_done_id, evaluate_jobs = ray.wait(evaluate_jobs)
-                            test_result = ray.get(test_done_id)[0]
-                            reward, seed, meta_id = test_result
-                            rewards[seed] = reward
-                            if seed_list:
-                                evaluate_jobs.append(test_agent_list[meta_id].testing.remote(seed=seed_list.pop()))
-                            if len(rewards) == TrainParams.EVALUATION_SAMPLES:
-                                break
-                        # 保存基线模型的评估结果
-                        rewards = dict(sorted(rewards.items()))
-                        baseline_value = np.stack(list(rewards.values()))
-                        for a in test_agent_list:
-                            ray.kill(a)
-
-                    test_agent_list = [RLRunner.remote(metaAgentID=i) for i in range(TrainParams.NUM_META_AGENT)]
-                    for _, test_agent in enumerate(test_agent_list):
-                        ray.get(test_agent.set_baseline_weights.remote(weights_memory))
-                    rewards = dict()
-                    seed_list = copy.deepcopy(test_set)
-                    evaluate_jobs = [test_agent_list[i].testing.remote(seed=seed_list.pop()) for i in range(TrainParams.NUM_META_AGENT)]
-                    while True:
-                        test_done_id, evaluate_jobs = ray.wait(evaluate_jobs)
-                        test_result = ray.get(test_done_id)[0]
-                        reward, seed, meta_id = test_result
-                        rewards[seed] = reward
-                        if seed_list:
-                            evaluate_jobs.append(test_agent_list[meta_id].testing.remote(seed=seed_list.pop()))
-                        if len(rewards) == TrainParams.EVALUATION_SAMPLES:
-                            break
-                    rewards = dict(sorted(rewards.items()))
-                    test_value = np.stack(list(rewards.values()))
-                    for a in test_agent_list:
-                        ray.kill(a)
-
-                    meta_agents = [RLRunner.remote(i) for i in range(TrainParams.NUM_META_AGENT)]
-
-                    # update baseline if the model improved more than 5%
-                    print('test value', test_value.mean())
-                    print('baseline value', baseline_value.mean())
-                    if test_value.mean() > baseline_value.mean():
-                        _, p = ttest_rel(test_value, baseline_value)
-                        print('p value', p)
-                        if p < 0.05:
-                            print('update baseline model at ', curr_episode)
-                            if device != local_device:
-                                weights = global_network.to(local_device).state_dict()
-                                global_network.to(device)
-                            else:
-                                weights = global_network.state_dict()
-                            baseline_weights = copy.deepcopy(weights)
-                            baseline_network.load_state_dict(baseline_weights)
-                            weights_memory = ray.put(weights)
-                            baseline_weights_memory = ray.put(baseline_weights)
-                            test_set = logger.generate_test_set_seed()
-                            print('update test set')
-                            baseline_value = None
-                            best_perf = test_value.mean()
-                            logger.save_model(curr_episode, None, best_perf)
-                    jobs = []
-                    for i, meta_agent in enumerate(meta_agents):
-                        jobs.append(meta_agent.training.remote(weights_memory, baseline_weights_memory, curr_episode, env_params))
-                        curr_episode += 1
-
-
-
     except KeyboardInterrupt:
-        # 处理键盘中断异常，确保清理远程worker
         print("CTRL_C pressed. Killing remote workers")
         for a in meta_agents:
             ray.kill(a)
