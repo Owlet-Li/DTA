@@ -9,11 +9,10 @@ from torch.distributions import Categorical
 import time
 
 class Worker:
-    def __init__(self, mete_agent_id, local_network, local_baseline, global_step, device='cuda', save_image=False, seed=None, env_params=None):
+    def __init__(self, mete_agent_id, local_network, local_baseline, global_step, device='cuda', seed=None, env_params=None):
         self.device = device
         self.metaAgentID = mete_agent_id
         self.global_step = global_step
-        self.save_image = save_image
         if env_params is None:
             env_params = [EnvParams.SPECIES_AGENTS_RANGE, EnvParams.SPECIES_RANGE, EnvParams.TASKS_RANGE]
         self.env = TaskEnv(*env_params, traits_dim=EnvParams.TRAIT_DIM, max_task_size=2, duration_scale=5, seed=seed, single_ability=False, heterogeneous_speed=False)
@@ -238,6 +237,39 @@ class Worker:
         perf_metrics['travel_dist'] = [np.sum(self.env.get_matrix(self.env.agent_dic, 'travel_dist'))]
         perf_metrics['efficiency'] = [self.env.get_efficiency()]
         return terminal_reward, buffer_dict, perf_metrics
+    
+    def baseline_test(self):
+        self.baseline_env.plot_figure = False
+        perf_metrics = {}
+        current_action_index = 0
+        start = time.time()
+        while not self.baseline_env.finished and self.baseline_env.current_time < self.max_time and current_action_index < 300:
+            with torch.no_grad():
+                release_agents, current_time = self.baseline_env.next_decision()
+                random.shuffle(release_agents[0])
+                self.baseline_env.current_time = current_time
+                if time.time() - start > 30:
+                    break
+                while release_agents[0] or release_agents[1]:
+                    agent_id = release_agents[0].pop(0) if release_agents[0] else release_agents[1].pop(0)
+                    agent = self.baseline_env.agent_dic[agent_id]
+                    task_info, total_agents, mask = self.convert_torch(self.baseline_env.agent_observe(agent_id, False))
+                    return_flag = mask[0, 1:].all().item()
+                    if return_flag and not np.all(self.baseline_env.get_matrix(self.baseline_env.task_dic, 'feasible_assignment')): ## add condition on returning to depot
+                        self.baseline_env.agent_dic[agent_id]['no_choice'] = return_flag
+                        continue
+                    elif return_flag and np.all(self.baseline_env.get_matrix(self.baseline_env.task_dic, 'feasible_assignment')) and agent['current_task'] < 0:
+                        continue
+                    task_info, total_agents, mask = self.obs_padding(task_info, total_agents, mask)
+                    index = torch.LongTensor([agent_id]).reshape(1, 1, 1).to(self.device)
+                    probs, _ = self.local_baseline(task_info, total_agents, mask, index)
+                    action = torch.argmax(probs, 1)
+                    self.baseline_env.agent_step(agent_id, action.item(), None)
+                    current_action_index += 1
+                self.baseline_env.finished = self.baseline_env.check_finished()
+
+        reward, finished_tasks = self.baseline_env.get_episode_reward(self.max_time)
+        return reward
 
     def work(self, episode_number, use_time_driven=False):
         """
@@ -252,7 +284,7 @@ class Worker:
 
             # 根据参数选择使用哪种方法运行episode
             if use_time_driven:
-                terminal_reward, buffer, perf_metrics = self.run_episode_every_time(training=True, sample=True, max_waiting=max_waiting, cooperation=False, render=False)
+                terminal_reward, buffer, perf_metrics = self.run_episode_every_time(training=True, sample=True, max_waiting=max_waiting)
             else:
                 terminal_reward, buffer, perf_metrics = self.run_episode(training=True, sample=True, max_waiting=max_waiting)
 

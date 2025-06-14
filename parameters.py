@@ -26,9 +26,10 @@ class TrainParams:
     EVALUATE = True
     DEADLOCK_CHECK_INTERVAL = 10
     DISABLE_MASK = False  # 如果设为True，所有任务都可选择（mask的所有元素设为False）
+    USE_TIME_DRIVEN = True
 
 class SaverParams:
-    FOLDER_NAME = 'save_5'
+    FOLDER_NAME = 'save_1_time_driven'
     TRAIN_PATH = f'train/{FOLDER_NAME}'
     SAVE = True
     MODEL_PATH = f'model/{FOLDER_NAME}'

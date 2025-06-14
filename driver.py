@@ -1,3 +1,12 @@
+import sys
+import io
+
+# On Windows, Ray can have issues with non-UTF-8 characters in stdout/stderr.
+# This forces the output streams to use UTF-8 encoding to prevent crashes.
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 from parameters import *
 from torch.utils.tensorboard import SummaryWriter
 import os
@@ -8,6 +17,8 @@ import torch.optim as optim
 from runner import RLRunner
 import numpy as np
 from torch.distributions import Categorical
+import copy
+from scipy.stats import ttest_rel
 
 class Logger:
     def __init__(self):
@@ -18,7 +29,7 @@ class Logger:
         self.writer = SummaryWriter(SaverParams.TRAIN_PATH)
         if SaverParams.SAVE:
             os.makedirs(SaverParams.MODEL_PATH, exist_ok=True)
-
+ 
     def set(self,  global_net, baseline_net, optimizer, lr_decay):
         self.global_net = global_net
         self.baseline_net = baseline_net
@@ -27,9 +38,9 @@ class Logger:
 
     def load_saved_model(self):
         print('Loading Model...')
-        checkpoint = torch.load(SaverParams.MODEL_PATH + '/checkpoint.pth')
+        checkpoint = torch.load(os.path.join(SaverParams.MODEL_PATH, 'checkpoint.pth'))
         if SaverParams.LOAD_FROM == 'best':
-            model = 'best_model'
+            model = 'best_model'      
         else:
             model = 'model'
         self.global_net.load_state_dict(checkpoint[model])
@@ -71,7 +82,7 @@ class Logger:
                       "level": curr_level,
                       "best_perf": best_perf
                       }
-        path_checkpoint = "./" + SaverParams.MODEL_PATH + "/checkpoint.pth"
+        path_checkpoint = os.path.join(SaverParams.MODEL_PATH, "checkpoint.pth")
         torch.save(checkpoint, path_checkpoint)
         print('Saved model', end='\n')
 
@@ -255,6 +266,86 @@ def main():
 
             if curr_episode % 512 == 0:
                 logger.save_model(curr_episode, curr_level, best_perf)
+
+            if TrainParams.EVALUATE:
+                if curr_episode % 1024 == 0:
+                    # stop the training
+                    ray.wait(jobs, num_returns=TrainParams.NUM_META_AGENT)
+                    for a in meta_agents:
+                        ray.kill(a)
+                    print('Evaluate baseline model at ', curr_episode)
+
+                    # test the baseline model on the new test set
+                    if baseline_value is None:
+                        test_agent_list = [RLRunner.remote(metaAgentID=i) for i in range(TrainParams.NUM_META_AGENT)]
+                        for _, test_agent in enumerate(test_agent_list):
+                            ray.get(test_agent.set_baseline_weights.remote(baseline_weights_memory))
+                        rewards = dict()
+                        seed_list = copy.deepcopy(test_set)
+                        evaluate_jobs = [test_agent_list[i].testing.remote(seed=seed_list.pop()) for i in range(TrainParams.NUM_META_AGENT)]
+                        while True:
+                            test_done_id, evaluate_jobs = ray.wait(evaluate_jobs)
+                            test_result = ray.get(test_done_id)[0]
+                            reward, seed, meta_id = test_result
+                            rewards[seed] = reward
+                            if seed_list:
+                                evaluate_jobs.append(test_agent_list[meta_id].testing.remote(seed=seed_list.pop()))
+                            if len(rewards) == TrainParams.EVALUATION_SAMPLES:
+                                break
+                        rewards = dict(sorted(rewards.items()))
+                        baseline_value = np.stack(list(rewards.values()))
+                        for a in test_agent_list:
+                            ray.kill(a)
+
+                    # test the current model's performance
+                    test_agent_list = [RLRunner.remote(metaAgentID=i) for i in range(TrainParams.NUM_META_AGENT)]
+                    for _, test_agent in enumerate(test_agent_list):
+                        ray.get(test_agent.set_baseline_weights.remote(weights_memory))
+                    rewards = dict()
+                    seed_list = copy.deepcopy(test_set)
+                    evaluate_jobs = [test_agent_list[i].testing.remote(seed=seed_list.pop()) for i in range(TrainParams.NUM_META_AGENT)]
+                    while True:
+                        test_done_id, evaluate_jobs = ray.wait(evaluate_jobs)
+                        test_result = ray.get(test_done_id)[0]
+                        reward, seed, meta_id = test_result
+                        rewards[seed] = reward
+                        if seed_list:
+                            evaluate_jobs.append(test_agent_list[meta_id].testing.remote(seed=seed_list.pop()))
+                        if len(rewards) == TrainParams.EVALUATION_SAMPLES:
+                            break
+                    rewards = dict(sorted(rewards.items()))
+                    test_value = np.stack(list(rewards.values()))
+                    for a in test_agent_list:
+                        ray.kill(a)
+
+                    meta_agents = [RLRunner.remote(i) for i in range(TrainParams.NUM_META_AGENT)]
+
+                    # update baseline if the model improved more than 5%
+                    print('test value', test_value.mean())
+                    print('baseline value', baseline_value.mean())
+                    if test_value.mean() > baseline_value.mean():
+                        _, p = ttest_rel(test_value, baseline_value)
+                        print('p value', p)
+                        if p < 0.05:
+                            print('update baseline model at ', curr_episode)
+                            if device != local_device:
+                                weights = global_network.to(local_device).state_dict()
+                                global_network.to(device)
+                            else:
+                                weights = global_network.state_dict()
+                            baseline_weights = copy.deepcopy(weights)
+                            baseline_network.load_state_dict(baseline_weights)
+                            weights_memory = ray.put(weights)
+                            baseline_weights_memory = ray.put(baseline_weights)
+                            test_set = logger.generate_test_set_seed()
+                            print('update test set')
+                            baseline_value = None
+                            best_perf = test_value.mean()
+                            logger.save_model(curr_episode, None, best_perf)
+                    jobs = []
+                    for i, meta_agent in enumerate(meta_agents):
+                        jobs.append(meta_agent.training.remote(weights_memory, baseline_weights_memory, curr_episode, env_params))
+                        curr_episode += 1
 
     except KeyboardInterrupt:
         print("CTRL_C pressed. Killing remote workers")

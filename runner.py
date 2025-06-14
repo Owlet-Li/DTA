@@ -27,8 +27,8 @@ class Runner(object):
         # set the local weights to the global weight values from the master network
         self.set_weights(global_weights)
         self.set_baseline_weights(baseline_weights)
-        worker = Worker(mete_agent_id=self.metaAgentID, local_network=self.localNetwork, local_baseline=self.localBaseline, global_step=curr_episode, device=self.device, save_image=False, seed=None, env_params=env_params)
-        worker.work(curr_episode, use_time_driven=False)
+        worker = Worker(mete_agent_id=self.metaAgentID, local_network=self.localNetwork, local_baseline=self.localBaseline, global_step=curr_episode, device=self.device, seed=None, env_params=env_params)
+        worker.work(curr_episode, use_time_driven=TrainParams.USE_TIME_DRIVEN)
 
         buffer = worker.experience
         perf_metrics = worker.perf_metrics
@@ -39,6 +39,12 @@ class Runner(object):
         }
 
         return buffer, perf_metrics, info
+
+    def testing(self, seed=None):
+        worker = Worker(self.metaAgentID, self.localNetwork, self.localBaseline,
+                        0, self.device, seed)
+        reward = worker.baseline_test()
+        return reward, seed, self.metaAgentID
 
 @ray.remote(num_cpus=1, num_gpus=TrainParams.NUM_GPU / TrainParams.NUM_META_AGENT)
 class RLRunner(Runner):

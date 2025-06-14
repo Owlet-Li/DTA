@@ -12,14 +12,14 @@ import os
 
 USE_GPU = False
 USE_GPU_GLOBAL = True
-FOLDER_NAME = 'save'
+FOLDER_NAME = 'save_1_time_driven'
 testSet = 'RALTestSet'
 model_path = f'model/{FOLDER_NAME}'
 training = False
 sample = True
 sampling_num = 1 if sample else 1
 max_waiting = False
-cooperation = True
+cooperation = False
 render = True
 disable_mask = False
 
