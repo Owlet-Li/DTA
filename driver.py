@@ -3,9 +3,9 @@ import io
 
 # On Windows, Ray can have issues with non-UTF-8 characters in stdout/stderr.
 # This forces the output streams to use UTF-8 encoding to prevent crashes.
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+# if sys.platform == "win32":
+#     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+#     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 from parameters import *
 from torch.utils.tensorboard import SummaryWriter
@@ -13,7 +13,7 @@ import os
 import ray
 import torch
 from attention import AttentionNet
-import torch.optim as optim
+import torch.optim as optim 
 from runner import RLRunner
 import numpy as np
 from torch.distributions import Categorical
@@ -230,11 +230,18 @@ def main():
                 lr_decay.step()
 
                 perf_data = []
-                for k, v in perf_metrics.items():
-                    perf_data.append(np.nanmean(perf_metrics[k]))
-                    del v[:]
+                # 按照固定顺序收集性能数据，与origin_driver.py保持一致
+                perf_data.append(np.nanmean(perf_metrics['success_rate']))
+                perf_data.append(np.nanmean(perf_metrics['makespan']))
+                perf_data.append(np.nanmean(perf_metrics['time_cost']))
+                perf_data.append(np.nanmean(perf_metrics['waiting_time']))
+                perf_data.append(np.nanmean(perf_metrics['travel_dist']))
+                perf_data.append(np.nanmean(perf_metrics['efficiency']))
+                
+                # 清空性能指标
                 for v in perf_metrics.values():
                     del v[:]
+                    
                 train_metrics = np.nanmean(train_metrics, axis=0)
                 data = [*train_metrics, *perf_data]
                 training_data.append(data)

@@ -12,7 +12,7 @@ import os
 
 USE_GPU = False
 USE_GPU_GLOBAL = True
-FOLDER_NAME = 'save_1_time_driven'
+FOLDER_NAME = 'save_2'
 testSet = 'RALTestSet'
 model_path = f'model/{FOLDER_NAME}'
 training = False

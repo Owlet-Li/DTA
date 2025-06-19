@@ -57,6 +57,7 @@ class TaskEnv:
             (0, 128, 255),  # 天蓝
             (128, 255, 0)   # 黄绿
         ]
+        self.max_time = 200
 
     def random_int(self, low, high, size=None):
         if self.rng is not None:
@@ -368,7 +369,14 @@ class TaskEnv:
 
     def get_arrival_time(self, agent_id, task_id):
         arrival_time = self.agent_dic[agent_id]['arrival_time']
-        arrival_for_task = np.where(np.array(self.agent_dic[agent_id]['route']) == task_id)[0][-1]
+        route = np.array(self.agent_dic[agent_id]['route'])
+        arrival_indices = np.where(route == task_id)[0]
+        
+        # 如果任务ID不在路径中，返回当前时间
+        if len(arrival_indices) == 0:
+            return float(self.current_time)
+        
+        arrival_for_task = arrival_indices[-1]
         return float(arrival_time[arrival_for_task])
 
     def get_current_task_status(self, agent):
@@ -504,6 +512,55 @@ class TaskEnv:
         dist = np.sum(self.get_matrix(self.agent_dic, 'travel_dist'))
         reward = - self.current_time - eff * 10 if self.finished else - max_time - eff * 10
         return reward, finished_tasks
+
+    def get_step_reward(self, agent_id, action):
+        """步骤级奖励设计"""
+        reward = 0.0
+        agent = self.agent_dic[agent_id]
+
+        # 1. 任务选择质量奖励
+        if action > 0:  # 选择任务
+            task_id = action - 1
+            task = self.task_dic[task_id]
+            # 能力匹配度奖励
+            ability_match = self.calculate_ability_match(agent, task)
+            reward += ability_match 
+
+            # 距离效率奖励（鼓励选择更近的任务）
+            distance = self.calculate_eulidean_distance(agent, task)
+            distance_penalty = - distance 
+            reward += distance_penalty
+
+            # 协作潜力奖励（鼓励选择有协作潜力的任务）
+            collaboration_potential = len(self.task_dic[task_id]['members'])
+            reward += collaboration_potential * 0.1
+
+        # 2. 等待时间惩罚
+        if agent['current_task'] >= 0:  # 只有当智能体有当前任务时才计算等待时间
+            arrival_time = self.get_arrival_time(agent_id, agent['current_task'])
+            if self.current_time - arrival_time > 0:
+                waiting_penalty = -(self.current_time - arrival_time) * 0.1
+            else:
+                waiting_penalty = 0
+            reward += waiting_penalty
+
+        return reward
+
+    def calculate_ability_match(self, agent, task):
+        """计算智能体与任务的能力匹配度"""
+        agent_abilities = np.array(agent['abilities'])
+        current_status = np.array(task['status'])
+
+        # 计算智能体能贡献多少
+        contribution = np.minimum(agent_abilities, current_status)
+        total_contribution = np.sum(contribution)
+        total_needed = np.sum(current_status)
+        
+        if total_needed == 0:
+            return 0  # 任务已完成
+            
+        return total_contribution / total_needed
+
 
     def calculate_waiting_time(self):
         for agent in self.agent_dic.values():

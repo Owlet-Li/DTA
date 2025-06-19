@@ -1,4 +1,6 @@
 import copy
+import sys
+import io
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -7,6 +9,12 @@ import ray
 import os
 import numpy as np
 import random
+
+# On Windows, Ray can have issues with non-UTF-8 characters in stdout/stderr.
+# This forces the output streams to use UTF-8 encoding to prevent crashes.
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 from attention import AttentionNet
 from origin_runner import RLRunner
@@ -53,7 +61,7 @@ class Logger(object):
 
     def load_saved_model(self):
         print('Loading Model...')
-        checkpoint = torch.load(SaverParams.MODEL_PATH + '/checkpoint.pth')
+        checkpoint = torch.load(SaverParams.MODEL_PATH + '/checkpoint.pth', weights_only=False)
         if SaverParams.LOAD_FROM == 'best':
             model = 'best_model'
         else:
